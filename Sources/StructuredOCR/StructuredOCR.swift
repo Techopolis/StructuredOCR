@@ -10,6 +10,11 @@ import UIKit
 #endif
 
 /// Main entry point for structured OCR processing.
+/// Uses Apple's Vision framework for text recognition with custom layout analysis
+/// to detect document structure (headings, paragraphs, tables, lists, columns).
+///
+/// Note: On iOS 26+/macOS 26+, Apple's new RecognizeDocumentsRequest API provides
+/// native document structure detection. This library will adopt that API when available.
 public actor StructuredOCR {
     private let textRecognizer: TextRecognizer
     private let layoutAnalyzer: LayoutAnalyzer
@@ -38,10 +43,10 @@ public actor StructuredOCR {
 
     /// Process an image and return a structured document.
     public func process(image: CGImage) async throws -> StructuredDocument {
-        // Step 1: Recognize text
+        // Step 1: Recognize text using Vision framework
         let textBlocks = try await textRecognizer.recognize(image: image)
 
-        // Step 2: Analyze layout
+        // Step 2: Analyze layout - detect columns and group into lines
         let lines = layoutAnalyzer.groupIntoLines(textBlocks)
         let columns = layoutAnalyzer.detectColumns(textBlocks)
         let heightStats = layoutAnalyzer.calculateHeightStatistics(textBlocks)
