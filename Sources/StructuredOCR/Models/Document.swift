@@ -43,18 +43,31 @@ public struct StructuredDocument: Sendable, Hashable, Identifiable {
         self.columns = columns
     }
 
-    /// Get all text in reading order
+    /// Get all text in reading order (respecting columns)
     public var fullText: String {
-        textBlocks
-            .sorted { block1, block2 in
-                // Sort top to bottom, then left to right
-                if abs(block1.boundingBox.maxY - block2.boundingBox.maxY) > 0.01 {
+        if isMultiColumn {
+            // Multi-column: read each column top to bottom, then move to next column
+            var allText: [String] = []
+            for column in columns.sorted(by: { $0.boundingBox.minX < $1.boundingBox.minX }) {
+                let columnBlocks = column.textBlocks.sorted { $0.boundingBox.maxY > $1.boundingBox.maxY }
+                allText.append(columnBlocks.map(\.text).joined(separator: " "))
+            }
+            return allText.joined(separator: "\n\n")
+        } else {
+            // Single column: standard reading order
+            return textBlocks
+                .sorted { block1, block2 in
+                    let avgHeight = (block1.boundingBox.height + block2.boundingBox.height) / 2
+                    // If on approximately the same line, sort left to right
+                    if abs(block1.boundingBox.maxY - block2.boundingBox.maxY) < avgHeight * 0.5 {
+                        return block1.boundingBox.minX < block2.boundingBox.minX
+                    }
+                    // Otherwise sort top to bottom
                     return block1.boundingBox.maxY > block2.boundingBox.maxY
                 }
-                return block1.boundingBox.minX < block2.boundingBox.minX
-            }
-            .map(\.text)
-            .joined(separator: " ")
+                .map(\.text)
+                .joined(separator: " ")
+        }
     }
 
     /// Check if the document has a multi-column layout
@@ -72,7 +85,7 @@ public struct StructuredDocument: Sendable, Hashable, Identifiable {
         !lists.isEmpty
     }
 
-    /// Get all elements in reading order as a heterogeneous collection
+    /// Get all elements in reading order as a heterogeneous collection (respects columns)
     public var elements: [DocumentElement] {
         var result: [DocumentElement] = []
 
@@ -89,9 +102,39 @@ public struct StructuredDocument: Sendable, Hashable, Identifiable {
             result.append(.list(list))
         }
 
-        return result.sorted { e1, e2 in
-            e1.boundingBox.maxY > e2.boundingBox.maxY
+        if isMultiColumn {
+            // Sort by column first, then by vertical position within column
+            return result.sorted { e1, e2 in
+                let col1 = columnIndex(for: e1.boundingBox)
+                let col2 = columnIndex(for: e2.boundingBox)
+
+                if col1 != col2 {
+                    return col1 < col2
+                }
+                return e1.boundingBox.maxY > e2.boundingBox.maxY
+            }
+        } else {
+            // Single column: sort by vertical position, then horizontal
+            return result.sorted { e1, e2 in
+                let avgHeight = (e1.boundingBox.height + e2.boundingBox.height) / 2
+                if abs(e1.boundingBox.maxY - e2.boundingBox.maxY) < avgHeight * 0.5 {
+                    return e1.boundingBox.minX < e2.boundingBox.minX
+                }
+                return e1.boundingBox.maxY > e2.boundingBox.maxY
+            }
         }
+    }
+
+    /// Determine which column an element belongs to
+    private func columnIndex(for box: BoundingBox) -> Int {
+        let centerX = box.center.x
+        for (index, column) in columns.enumerated() {
+            if centerX >= column.boundingBox.minX && centerX <= column.boundingBox.maxX {
+                return index
+            }
+        }
+        // Default to finding closest column
+        return columns.enumerated().min(by: { abs($0.element.boundingBox.center.x - centerX) < abs($1.element.boundingBox.center.x - centerX) })?.offset ?? 0
     }
 }
 

@@ -6,19 +6,19 @@ public struct LayoutAnalyzer: Sendable {
     /// Threshold for considering blocks on the same line (as fraction of average height)
     public var lineThreshold: CGFloat
 
-    /// Threshold for considering blocks in the same column (as fraction of page width)
-    public var columnThreshold: CGFloat
+    /// Minimum gap width to consider as a column separator (as fraction of page width)
+    public var columnGapThreshold: CGFloat
 
     /// Minimum number of aligned elements to consider a column
     public var minimumColumnElements: Int
 
     public init(
         lineThreshold: CGFloat = 0.5,
-        columnThreshold: CGFloat = 0.1,
+        columnGapThreshold: CGFloat = 0.03,
         minimumColumnElements: Int = 3
     ) {
         self.lineThreshold = lineThreshold
-        self.columnThreshold = columnThreshold
+        self.columnGapThreshold = columnGapThreshold
         self.minimumColumnElements = minimumColumnElements
     }
 
@@ -57,21 +57,52 @@ public struct LayoutAnalyzer: Sendable {
         return lines
     }
 
-    /// Detect columns in the document
+    /// Detect columns by finding vertical gutters (whitespace gaps) in the document
     public func detectColumns(_ blocks: [TextBlock]) -> [Column] {
         guard blocks.count >= minimumColumnElements else { return [] }
 
-        // Find distinct x-position clusters
-        let xPositions = blocks.map { $0.boundingBox.minX }
-        let clusters = clusterValues(xPositions, threshold: columnThreshold)
+        // Find vertical gutters by analyzing horizontal gaps across multiple lines
+        let lines = groupIntoLines(blocks)
+        guard lines.count >= 2 else { return [] }
 
-        guard clusters.count > 1 else { return [] }
+        // Collect all horizontal gaps between blocks on each line
+        var allGaps: [(start: CGFloat, end: CGFloat)] = []
+
+        for line in lines where line.count > 1 {
+            let sortedLine = line.sorted { $0.boundingBox.minX < $1.boundingBox.minX }
+            for i in 0..<(sortedLine.count - 1) {
+                let gapStart = sortedLine[i].boundingBox.maxX
+                let gapEnd = sortedLine[i + 1].boundingBox.minX
+                let gapWidth = gapEnd - gapStart
+
+                if gapWidth >= columnGapThreshold {
+                    allGaps.append((start: gapStart, end: gapEnd))
+                }
+            }
+        }
+
+        // Find consistent gutters (gaps that appear at similar x positions across lines)
+        let gutters = findConsistentGutters(allGaps, minOccurrences: lines.count / 3)
+
+        guard !gutters.isEmpty else { return [] }
+
+        // Create columns based on gutters
+        var columnBoundaries: [CGFloat] = [0.0]
+        for gutter in gutters {
+            let gutterCenter = (gutter.start + gutter.end) / 2
+            columnBoundaries.append(gutterCenter)
+        }
+        columnBoundaries.append(1.0)
 
         var columns: [Column] = []
 
-        for (index, cluster) in clusters.enumerated() {
+        for i in 0..<(columnBoundaries.count - 1) {
+            let leftBound = columnBoundaries[i]
+            let rightBound = columnBoundaries[i + 1]
+
             let columnBlocks = blocks.filter { block in
-                cluster.contains { abs($0 - block.boundingBox.minX) < columnThreshold }
+                let centerX = block.boundingBox.center.x
+                return centerX >= leftBound && centerX < rightBound
             }
 
             guard columnBlocks.count >= minimumColumnElements else { continue }
@@ -81,18 +112,45 @@ public struct LayoutAnalyzer: Sendable {
             columns.append(Column(
                 boundingBox: boundingBox,
                 textBlocks: columnBlocks,
-                index: index
+                index: i
             ))
         }
 
         return columns.sorted { $0.boundingBox.minX < $1.boundingBox.minX }
     }
 
+    /// Get text blocks in proper reading order (respecting columns)
+    public func getReadingOrder(_ blocks: [TextBlock]) -> [TextBlock] {
+        let columns = detectColumns(blocks)
+
+        if columns.count > 1 {
+            // Multi-column: read each column top to bottom, then move to next column
+            var ordered: [TextBlock] = []
+            for column in columns {
+                let columnBlocks = column.textBlocks.sorted { $0.boundingBox.maxY > $1.boundingBox.maxY }
+                ordered.append(contentsOf: columnBlocks)
+            }
+            return ordered
+        } else {
+            // Single column: standard top-to-bottom, left-to-right
+            return blocks.sorted { block1, block2 in
+                let avgHeight = (block1.boundingBox.height + block2.boundingBox.height) / 2
+                // If on approximately the same line, sort left to right
+                if abs(block1.boundingBox.maxY - block2.boundingBox.maxY) < avgHeight * lineThreshold {
+                    return block1.boundingBox.minX < block2.boundingBox.minX
+                }
+                // Otherwise sort top to bottom
+                return block1.boundingBox.maxY > block2.boundingBox.maxY
+            }
+        }
+    }
+
     /// Find blocks that are vertically adjacent (potential paragraphs)
     public func findVerticallyAdjacentGroups(_ blocks: [TextBlock], maxGap: CGFloat = 0.02) -> [[TextBlock]] {
         guard !blocks.isEmpty else { return [] }
 
-        let sorted = blocks.sorted { $0.boundingBox.maxY > $1.boundingBox.maxY }
+        // Use reading order for proper column handling
+        let sorted = getReadingOrder(blocks)
 
         var groups: [[TextBlock]] = []
         var currentGroup: [TextBlock] = [sorted[0]]
@@ -101,8 +159,8 @@ public struct LayoutAnalyzer: Sendable {
             let lastBlock = currentGroup.last!
             let gap = lastBlock.boundingBox.minY - block.boundingBox.maxY
 
-            // Check if vertically adjacent and horizontally overlapping
-            if gap < maxGap && gap >= 0 &&
+            // Check if vertically adjacent and horizontally overlapping (same column)
+            if gap < maxGap && gap >= -0.01 &&
                block.boundingBox.isHorizontallyAligned(with: lastBlock.boundingBox, tolerance: 0.3) {
                 currentGroup.append(block)
             } else {
@@ -148,23 +206,40 @@ public struct LayoutAnalyzer: Sendable {
 
     // MARK: - Private Helpers
 
-    private func clusterValues(_ values: [CGFloat], threshold: CGFloat) -> [[CGFloat]] {
-        guard !values.isEmpty else { return [] }
+    private func findConsistentGutters(_ gaps: [(start: CGFloat, end: CGFloat)], minOccurrences: Int) -> [(start: CGFloat, end: CGFloat)] {
+        guard !gaps.isEmpty else { return [] }
 
-        let sorted = values.sorted()
-        var clusters: [[CGFloat]] = [[sorted[0]]]
+        // Cluster gaps by their center position
+        var gutterClusters: [[(start: CGFloat, end: CGFloat)]] = []
 
-        for value in sorted.dropFirst() {
-            if let lastCluster = clusters.last,
-               let lastValue = lastCluster.last,
-               abs(value - lastValue) < threshold {
-                clusters[clusters.count - 1].append(value)
-            } else {
-                clusters.append([value])
+        for gap in gaps {
+            let gapCenter = (gap.start + gap.end) / 2
+            var foundCluster = false
+
+            for i in 0..<gutterClusters.count {
+                let clusterCenter = gutterClusters[i].map { ($0.start + $0.end) / 2 }.reduce(0, +) / CGFloat(gutterClusters[i].count)
+
+                if abs(gapCenter - clusterCenter) < 0.05 {
+                    gutterClusters[i].append(gap)
+                    foundCluster = true
+                    break
+                }
+            }
+
+            if !foundCluster {
+                gutterClusters.append([gap])
             }
         }
 
-        return clusters
+        // Return gutters that appear consistently
+        return gutterClusters
+            .filter { $0.count >= max(minOccurrences, 2) }
+            .map { cluster in
+                let avgStart = cluster.map(\.start).reduce(0, +) / CGFloat(cluster.count)
+                let avgEnd = cluster.map(\.end).reduce(0, +) / CGFloat(cluster.count)
+                return (start: avgStart, end: avgEnd)
+            }
+            .sorted { $0.start < $1.start }
     }
 
     private func combineBoundingBoxes(_ boxes: [BoundingBox]) -> BoundingBox {
