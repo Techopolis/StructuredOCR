@@ -43,8 +43,15 @@ public struct StructuredDocument: Sendable, Hashable, Identifiable {
         self.columns = columns
     }
 
-    /// Get all text in reading order (respecting columns)
+    /// Get all text in reading order.
+    /// When processed with iOS 26+ RecognizeDocumentsRequest, uses paragraphs which are
+    /// already in proper reading order. For legacy API, uses text blocks sorted by position.
     public var fullText: String {
+        // If we have paragraphs (iOS 26+ or detected), use them - they're in reading order
+        if !paragraphs.isEmpty {
+            return paragraphs.map(\.text).joined(separator: "\n\n")
+        }
+
         if isMultiColumn {
             // Multi-column: read each column top to bottom, then move to next column
             var allText: [String] = []
@@ -54,7 +61,7 @@ public struct StructuredDocument: Sendable, Hashable, Identifiable {
             }
             return allText.joined(separator: "\n\n")
         } else {
-            // Single column: standard reading order
+            // Single column: standard reading order from text blocks
             return textBlocks
                 .sorted { block1, block2 in
                     let avgHeight = (block1.boundingBox.height + block2.boundingBox.height) / 2
@@ -85,7 +92,9 @@ public struct StructuredDocument: Sendable, Hashable, Identifiable {
         !lists.isEmpty
     }
 
-    /// Get all elements in reading order as a heterogeneous collection (respects columns)
+    /// Get all elements in reading order as a heterogeneous collection.
+    /// When processed with iOS 26+ RecognizeDocumentsRequest, elements are already in
+    /// proper reading order. For legacy API, elements are sorted by position.
     public var elements: [DocumentElement] {
         var result: [DocumentElement] = []
 
@@ -102,6 +111,12 @@ public struct StructuredDocument: Sendable, Hashable, Identifiable {
             result.append(.list(list))
         }
 
+        // If no columns detected, the reading order is already correct
+        // (either from iOS 26 RecognizeDocumentsRequest or single-column document)
+        if columns.isEmpty {
+            return result
+        }
+
         if isMultiColumn {
             // Sort by column first, then by vertical position within column
             return result.sorted { e1, e2 in
@@ -114,7 +129,7 @@ public struct StructuredDocument: Sendable, Hashable, Identifiable {
                 return e1.boundingBox.maxY > e2.boundingBox.maxY
             }
         } else {
-            // Single column: sort by vertical position, then horizontal
+            // Single column with column data: sort by vertical position, then horizontal
             return result.sorted { e1, e2 in
                 let avgHeight = (e1.boundingBox.height + e2.boundingBox.height) / 2
                 if abs(e1.boundingBox.maxY - e2.boundingBox.maxY) < avgHeight * 0.5 {
