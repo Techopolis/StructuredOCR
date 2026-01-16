@@ -39,7 +39,11 @@ dependencies: [
 ]
 ```
 
-Or add it through Xcode: **File → Add Package Dependencies** and enter the repository URL.
+Or add it through Xcode:
+
+1. Go to **File → Add Package Dependencies**
+2. Enter the repository URL: `https://github.com/Techopolis/StructuredOCR`
+3. Click **Add Package**
 
 ## Usage
 
